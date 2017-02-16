@@ -74,7 +74,7 @@ def execute(args):
                     # A CNAME record was returned as well, add this.
                     cname_record = {}
                     cname_record["domain"] = domain
-                    cname_record["result"] = subresult.canonical_name.to_text()
+                    cname_record["result"] = [ subresult.canonical_name.to_text() ]
                     cname_record["type"] = "CNAME"
                     results.append(cname_record)
                     log(verbose, "[+] Hit CNAME: %s - %s" % (domain, cname_record["result"]))
