@@ -6,4 +6,4 @@ echo "Done."
 
 echo ""
 echo "Setting up bin links."
-sudo ln -s $(pwd)/dns-probe.py /usr/bin/dns-probe
+sudo ln -f -s $(pwd)/dns-probe.py /usr/bin/dns-probe
