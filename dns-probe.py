@@ -1,5 +1,6 @@
 #!/usr/bin/env python
 import dns.resolver
+import threading
 import argparse
 import sys
 
@@ -13,12 +14,8 @@ def execute(args):
     Param       Value   Description                         Default (Or required)
     domains     []      Domains to probe                    required
     wordlist    path    Wordlist to use when probing        ""
-    type    str     The type of DNS record to lookup    "A"
+    type        []      The type of DNS records to lookup   ["A"]
     namservers  []      Nameservers to use                  system default
-    depth       int     Stop after #depth rec. steps        1
-    use-cache   Bool    Search the enabled cache modules    False
-    save-state  Bool    Enable the saving of state          False
-    resume      Bool    Attempt to resume previous probe    False
     verbose     Bool    Log verbose status message to outp  False
     debug       Bool    Log debug messages                  False
     '''
@@ -34,33 +31,92 @@ def execute(args):
         log(debug, "[+] Using wordlist: %s" % args["wordlist"])
         with open(args["wordlist"], "r") as f:
             wordlist = map(lambda x: x.strip(), f.readlines())
+    log(debug, "[+] Running with %d threads." % args["threads"])
 
-    results = {}
+    results = []
+    recordtypes = args["types"]
     for domain in args["domains"]:
-        subresult = lookup(resolver, domain, args["type"])
-        if subresult != []:
-            log(verbose, "[+] Hit: %s" % domain)
-            results[domain] = {}
-            results[domain]["domain"] = domain
-            results[domain]["result"] = subresult
-            results[domain]["type"] = args["type"]
-        else:
-            log(debug, "[-] Miss: %s" % domain)
-
-    for domain in args["domains"]:
-        for word in wordlist:
-            subdomain = "%s.%s" % (word, domain)
-            subresult = lookup(resolver, subdomain, args["type"])
+        for recordtype in recordtypes:
+            subresult = lookup(resolver, domain, recordtype)
             if subresult != []:
-                log(verbose, "[+] Hit: %s" % subdomain)
-                results[subdomain] = {}
-                results[subdomain]["domain"] = subdomain
-                results[subdomain]["result"] = subresult
-                results[subdomain]["type"] = args["type"]
+                log(verbose, "[+] Hit: %s - %s" % (domain, recordtype))
+                dom_results = {}
+                dom_results["domain"] = domain
+                dom_results["result"] = subresult
+                dom_results["type"] = recordtype
+                results.append(dom_results)
             else:
-                log(debug, "[-] Miss: %s" % subdomain)
+                log(debug, "[-] Miss: %s - %s" % (domain, recordtype))
+
+    if wordlist:
+        # Divide the wordlist into shards for the different threads.
+        shard_count = args["threads"]
+        word_count = len(wordlist)
+        words_in_shard = word_count/shard_count
+        shards = []
+        for i in range(0, shard_count):
+            offset = i * words_in_shard
+            shards.append((offset, offset + words_in_shard))
+        # If space is not evenly divided, ensure that the last thread checks the
+        # leftovers
+        shards[len(shards)-1] = (shards[len(shards)-1][0], word_count)
+
+        log_lock = threading.Lock()
+
+        for domain in args["domains"]:
+            threads = []
+            for i in range(0, shard_count):
+                threads.append(ThreadedLookup(resolver, domain, wordlist, args["types"], verbose, debug, log_lock, shards[i][0], shards[i][1]))
+            
+            for thread in threads:
+                thread.start()
     
+            for thread in threads:
+                try:
+                    thread.join()
+                except:
+                    continue
+
+            for thread in threads:
+                results.extend(thread.results)
+            
     return results
+
+class ThreadedLookup(threading.Thread):
+    def __init__(self, resolver, domain, wordlist, recordtypes, verbose, debug, log_lock, start_idx, stop_idx):
+        threading.Thread.__init__(self)
+        self.log_lock = log_lock
+        self.resolver = resolver
+        self.wordlist = wordlist
+        self.recordtypes = recordtypes
+        self.domain = domain
+        self.verbose = verbose
+        self.debug = debug
+        self.start_index = start_idx
+        self.stop_index = stop_idx
+        self.results = []
+
+    def run(self):
+        for i in range(self.start_index, self.stop_index):
+            subdomain = "%s.%s" % (self.wordlist[i], self.domain)
+            for recordtype in self.recordtypes:
+                subresult = lookup(self.resolver, subdomain, recordtype)
+                if subresult != []:
+                    self.log_lock.acquire()             
+                    log(self.verbose, "[+] Hit: %s - %s" % (subdomain, recordtype))
+                    self.log_lock.release()
+        
+                    dom_results = {}
+                    dom_results["domain"] = subdomain
+                    dom_results["result"] = subresult
+                    dom_results["type"] = recordtype
+                    self.results.append(dom_results)
+                else:
+                    self.log_lock.acquire()             
+                    log(self.debug, "[-] Miss: %s - %s" % (subdomain, recordtype))
+                    self.log_lock.release()
+            
+         
 
 def lookup(resolver, domain, recordtype):
     results = []
@@ -82,16 +138,13 @@ def parse_cmdline():
     parser.add_argument("-d", "--domains", help="The domains to probe.", nargs="*", default=[])
     parser.add_argument("-n", "--nameservers", help="The domain servers to use", nargs="*", default=[])
     parser.add_argument("-l", "--wordlist", help="Wordlist of possible subdomains.", default="")
-    parser.add_argument("-t", "--type", help="The type of dns record to look up.", default="A")
-    parser.add_argument("-D", "--depth", help="Max depth of recursive search.", default=1)
-    parser.add_argument("-c", "--use-cache", help="Search known caches.", default=False, action="store_true")
-    parser.add_argument("-s", "--save-state", help="Save state during probe.", default=False, action="store_true")
-    parser.add_argument("-p", "--resume", help="Attempt to resume previous probing", default=False, action="store_true")
+    parser.add_argument("-T", "--threads", help="Number of threads to use when bruting with a wordlist.", default=1, type=int)
+    parser.add_argument("-t", "--types", help="The type of dns record to look up.", default=["A"], choices=["A", "AAAA", "MX", "TXT", "NS", "SOA", "CNAME"], nargs="*")
     parser.add_argument("-v", "--verbose", help="Verbose status messages.", default=False, action="store_true")
     parser.add_argument("-f", "--format", help="Format of the output.", default="grep", choices={"grep", "json"})
     parser.add_argument("-V", "--debug", help="Log debug messages.", default=False, action="store_true")
     parser.add_argument("-r", "--read", help="Read domains from file.")
-    parser.add_argument("-w", "--write", help="Write results to file.", default="")
+    parser.add_argument("-w", "--write", help="Write results to files using the given base path.", default="")
     
     args = parser.parse_args() 
 
@@ -126,9 +179,11 @@ if __name__ == "__main__":
     if args["write"] != "":
         fd_out = open(args["write"], "w")
 
-    for domain, result in results.iteritems():
-        output = formatter(result)
-        fd_out.write(output + "\n")
+    for recordtype in args["types"]:
+        subresults = filter(lambda x: x["type"] == recordtype, results)
+        for result in subresults:
+            output = formatter(result)
+            fd_out.write(output + "\n")
     
     if args["write"] != "":
         fd_out.close()
