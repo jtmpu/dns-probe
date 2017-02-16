@@ -16,6 +16,7 @@ def execute(args):
     wordlist    path    Wordlist to use when probing        ""
     types       []      The type of DNS records to lookup   ["A"]
     namservers  []      Nameservers to use                  system default
+    store_miss  Bool    Store misses as well                False
     verbose     Bool    Log verbose status message to outp  False
     debug       Bool    Log debug messages                  False
     '''
@@ -27,6 +28,8 @@ def execute(args):
         args["types"] = ["A"]
     if "nameservers" not in args:
         args["nameservers"] = []
+    if "store_miss" not in args:
+        args["store_miss"] = False
     if "verbose" not in args:
         args["verbose"] = False
     if "debug" not in args:
@@ -53,15 +56,36 @@ def execute(args):
     for domain in args["domains"]:
         for recordtype in recordtypes:
             subresult = lookup(resolver, domain, recordtype)
-            if subresult != []:
+            if subresult:
+                answers = []
+                for answer in subresult:
+                    answers.append(str(answer))
+
+                    
                 log(verbose, "[+] Hit: %s - %s" % (domain, recordtype))
                 dom_results = {}
                 dom_results["domain"] = domain
-                dom_results["result"] = subresult
+                dom_results["result"] = answers
                 dom_results["type"] = recordtype
                 results.append(dom_results)
+
+                # Add "." to end of domain as this is expected format 
+                if subresult.canonical_name.to_text() != domain + ".": 
+                    # A CNAME record was returned as well, add this.
+                    cname_record = {}
+                    cname_record["domain"] = domain
+                    cname_record["result"] = subresult.canonical_name.to_text()
+                    cname_record["type"] = "CNAME"
+                    results.append(cname_record)
+                    log(verbose, "[+] Hit CNAME: %s - %s" % (domain, cname_record["result"]))
             else:
                 log(debug, "[-] Miss: %s - %s" % (domain, recordtype))
+                if args["store_miss"]:
+                    res = {}
+                    res["domain"] = domain
+                    res["result"] = []
+                    res["type"] = "NXDOMAIN"
+                    results.append(res)
 
     # If wordlist use => bruteforce all specified domains with wordlist.
     if wordlist:
@@ -82,7 +106,7 @@ def execute(args):
         for domain in args["domains"]:
             threads = []
             for i in range(0, shard_count):
-                threads.append(ThreadedLookup(resolver, domain, wordlist, args["types"], verbose, debug, log_lock, shards[i][0], shards[i][1]))
+                threads.append(ThreadedLookup(resolver, domain, wordlist, args["types"], verbose, debug, args["store_miss"], log_lock, shards[i][0], shards[i][1]))
             
             for thread in threads:
                 thread.start()
@@ -99,7 +123,7 @@ def execute(args):
     return results
 
 class ThreadedLookup(threading.Thread):
-    def __init__(self, resolver, domain, wordlist, recordtypes, verbose, debug, log_lock, start_idx, stop_idx):
+    def __init__(self, resolver, domain, wordlist, recordtypes, verbose, debug, store_miss, log_lock, start_idx, stop_idx):
         threading.Thread.__init__(self)
         self.log_lock = log_lock
         self.resolver = resolver
@@ -110,6 +134,7 @@ class ThreadedLookup(threading.Thread):
         self.debug = debug
         self.start_index = start_idx
         self.stop_index = stop_idx
+        self.store_miss = store_miss
         self.results = []
 
     def run(self):
@@ -117,32 +142,53 @@ class ThreadedLookup(threading.Thread):
             subdomain = "%s.%s" % (self.wordlist[i], self.domain)
             for recordtype in self.recordtypes:
                 subresult = lookup(self.resolver, subdomain, recordtype)
-                if subresult != []:
+                if subresult:
+                    answers = []
+                    for answer in subresult:
+                        answers.append(str(answer))
+                    
                     self.log_lock.acquire()             
                     log(self.verbose, "[+] Hit: %s - %s" % (subdomain, recordtype))
                     self.log_lock.release()
         
                     dom_results = {}
                     dom_results["domain"] = subdomain
-                    dom_results["result"] = subresult
+                    dom_results["result"] = answers
                     dom_results["type"] = recordtype
                     self.results.append(dom_results)
+                    # Add "." to end of domain as this is expected format 
+                    if subresult.canonical_name.to_text() != subdomain + ".":
+                        # A CNAME record was returned as well, add this.
+                        cname_record = {}
+                        cname_record["domain"] = subdomain
+                        cname_record["result"] = [ subresult.canonical_name.to_text() ]
+                        cname_record["type"] = "CNAME"
+                        self.log_lock.acquire()
+                        log(self.verbose, "[+] Hit CNAME: %s - %s" % (cname_record["domain"], cname_record["result"]))
+                        self.log_lock.release()
+                        self.results.append(cname_record)
                 else:
                     self.log_lock.acquire()             
                     log(self.debug, "[-] Miss: %s - %s" % (subdomain, recordtype))
                     self.log_lock.release()
+                    
+                    if self.store_miss:
+                        res = {}
+                        res["domain"] = subdomain
+                        res["result"] = []
+                        res["type"] = "NXDOMAIN"
+                        self.results.append(res)
+                    
             
          
 
 def lookup(resolver, domain, recordtype):
-    results = []
+    answers = None
     try:
         answers = resolver.query(domain, recordtype)
-        for answer in answers:
-            results.append(str(answer))
     except Exception as e:
-        return []
-    return results
+        return None
+    return answers
         
 
 def log(should_log, msg):
@@ -161,6 +207,7 @@ def parse_cmdline():
     parser.add_argument("-V", "--debug", help="Log debug messages.", default=False, action="store_true")
     parser.add_argument("-r", "--read", help="Read domains from file.")
     parser.add_argument("-w", "--write", help="Write results to files using the given base path.", default="")
+    parser.add_argument("-s", "--store-miss", help="Store the result even tho there was a NXDOMAIN (miss) when performing the lookup.", default=False, action="store_true")
     
     args = parser.parse_args() 
 
@@ -195,11 +242,9 @@ if __name__ == "__main__":
     if args["write"] != "":
         fd_out = open(args["write"], "w")
 
-    for recordtype in args["types"]:
-        subresults = filter(lambda x: x["type"] == recordtype, results)
-        for result in subresults:
-            output = formatter(result)
-            fd_out.write(output + "\n")
+    for result in results:
+        output = formatter(result)
+        fd_out.write(output + "\n")
     
     if args["write"] != "":
         fd_out.close()
