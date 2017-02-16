@@ -14,13 +14,27 @@ def execute(args):
     Param       Value   Description                         Default (Or required)
     domains     []      Domains to probe                    required
     wordlist    path    Wordlist to use when probing        ""
-    type        []      The type of DNS records to lookup   ["A"]
+    types       []      The type of DNS records to lookup   ["A"]
     namservers  []      Nameservers to use                  system default
     verbose     Bool    Log verbose status message to outp  False
     debug       Bool    Log debug messages                  False
     '''
-    debug = "debug" in args and args["debug"] == True
-    verbose = debug or ("verbose" in args and args["verbose"] == True)
+    if args["domains"] == []:
+        raise Exception("Domains required.")
+    if "wordlist" not in args:
+        args["wordlist"] = ""
+    if "types" not in args or args["types"] == []:
+        args["types"] = ["A"]
+    if "nameservers" not in args:
+        args["nameservers"] = []
+    if "verbose" not in args:
+        args["verbose"] = False
+    if "debug" not in args:
+        args["debug"] = False
+
+    debug = args["debug"]
+    verbose = debug or args["verbose"]
+
     resolver = dns.resolver.get_default_resolver()
     if args["nameservers"] != []:
         resolver.nameservers = args["nameservers"]
@@ -33,6 +47,7 @@ def execute(args):
             wordlist = map(lambda x: x.strip(), f.readlines())
     log(debug, "[+] Running with %d threads." % args["threads"])
 
+    # Check the specified domains
     results = []
     recordtypes = args["types"]
     for domain in args["domains"]:
@@ -48,6 +63,7 @@ def execute(args):
             else:
                 log(debug, "[-] Miss: %s - %s" % (domain, recordtype))
 
+    # If wordlist use => bruteforce all specified domains with wordlist.
     if wordlist:
         # Divide the wordlist into shards for the different threads.
         shard_count = args["threads"]
