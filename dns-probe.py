@@ -26,8 +26,10 @@ def execute(args):
     '''
     if args["domains"] == []:
         raise Exception("Domains required.")
+    if "wordlist_file" not in args:
+        args["wordlist_file"] = ""
     if "wordlist" not in args:
-        args["wordlist"] = ""
+        args["wordlist"] = []
     if "types" not in args or args["types"] == []:
         args["types"] = ["A"]
     if "nameservers" not in args:
@@ -47,11 +49,15 @@ def execute(args):
         resolver.nameservers = args["nameservers"]
     log(debug, "[+] Using nameservers: %s" % resolver.nameservers)
 
-    wordlist = []
-    if args["wordlist"] != "":
+    wordlist = args["wordlist"]
+    if args["wordlist_file"] != "":
         log(debug, "[+] Using wordlist: %s" % args["wordlist"])
         with open(args["wordlist"], "r") as f:
-            wordlist = map(lambda x: x.strip(), f.readlines())
+            wordlist.extend(map(lambda x: x.strip(), f.readlines()))
+
+    if wordlist == []:
+        lines = map(lambda x: x.strip(), sys.stdin.readlines()) 
+        wordlist.extend(lines)
 
     log(debug, "[+] Running with %d threads." % args["threads"])
 
@@ -134,26 +140,18 @@ def parse_cmdline():
     parser = argparse.ArgumentParser()
     parser.add_argument("-d", "--domains", help="The domains to probe.", nargs="*", default=[])
     parser.add_argument("-n", "--nameservers", help="The domain servers to use", nargs="*", default=[])
-    parser.add_argument("-l", "--wordlist", help="Wordlist of possible subdomains.", default="")
+    parser.add_argument("-lf", "--wordlist_file", help="Wordlist of possible subdomains.", default="")
+    parser.add_argument("-l", "--wordlist", help="Wordlist of possible subdomains.", default=[], nargs="*")
     parser.add_argument("-t", "--types", help="The type of dns record to look up.", default=["A"], choices=["A", "AAAA", "MX", "TXT", "NS", "SOA", "CNAME"], nargs="*")
     parser.add_argument("-v", "--verbose", help="Verbose status messages.", default=False, action="store_true")
     parser.add_argument("-f", "--format", help="Format of the output.", default="grep", choices={"grep", "json"})
     parser.add_argument("-V", "--debug", help="Log debug messages.", default=False, action="store_true")
-    parser.add_argument("-r", "--read", help="Read domains from file.")
     parser.add_argument("-w", "--write", help="Write results to files using the given base path.", default="")
     parser.add_argument("-s", "--store-miss", help="Store the result even tho there was a NXDOMAIN (miss) when performing the lookup.", default=False, action="store_true")
     parser.add_argument("-T", "--threads", help="Number of threads to use when bruting with a wordlist.", default=1, type=int)
     parser.add_argument("-R", "--rate", help="Maximum number of requests per second allowed", default=1000, type=int)
     
     args = parser.parse_args() 
-
-    if args.read:
-        with open(args.read, "r") as f:
-            lines = map(lambda x: x.strip(), f.readlines())
-            args.domains.extend(lines)
-    if args.domains == []:
-        lines = sys.stdin.readlines()
-        args.domains.extend(map(lambda x: x.strip(), lines))
 
     return vars(args)
 
